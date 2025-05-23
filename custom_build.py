@@ -148,7 +148,6 @@ class FileOperations:
             
         self.console.print(f"\n[bold blue]Starting Flutter build in {client_path}[/bold blue]")
         
-        # Auto-detect Flutter using 'where flutter' command
         try:
             flutter_result = subprocess.run(['where', 'flutter'], 
                                            capture_output=True, 
@@ -159,7 +158,6 @@ class FileOperations:
                 self.console.print("[red]Error: Flutter not found in PATH. Please install Flutter or add it to PATH.[/red]")
                 return False
                 
-            # Parse output to find the .bat file on Windows
             flutter_paths = flutter_result.stdout.strip().split('\n')
             flutter_exe = None
             
@@ -291,8 +289,12 @@ def copy_flet_components(file_ops, source_paths, output_dir, exclusions=None):
     exclusions = exclusions or ["*.pyc", "*.pdb", "*.log"]
     copied_counts = {}
     
-    # Clear output directory first
-    file_ops.clear_directory(output_dir)
+    # Only clear specific component directories
+    for name in ["flet", "flet_cli", "flet_desktop", "flet_web"]:
+        component_dir = os.path.join(output_dir, name)
+        if os.path.exists(component_dir):
+            console.print(f"[blue]Clearing {name} directory...[/blue]")
+            file_ops.clear_directory(component_dir)
     
     # Copy components (excluding desktop app)
     for name, path in source_paths.items():
@@ -320,8 +322,71 @@ def copy_desktop_app(file_ops, desktop_app_path, output_dir, exclusions=None):
     
     return copied, console
 
-def run_build(source_path, output_dir, exclusions):
-        file_ops = FileOperations(source_path, output_dir)
+def install_msgpack(output_dir):
+    """Install msgpack using pip if target directory is a site-packages directory"""
+    console = Console()
+    
+    # Check if target directory is a site-packages directory
+    if "site-packages" in output_dir:
+        console.print("\n[bold cyan]━━━ Installing msgpack Package ━━━[/bold cyan]")
+        
+        # Prepare pip command with target directory
+        target_dir = output_dir
+        pip_cmd = ["pip", "install", "msgpack", "-t", target_dir, "--upgrade", "--no-dependencies"]
+        
+        console.print(f"[cyan]Running command: {' '.join(pip_cmd)}[/cyan]")
+        
+        # Setup rich progress display
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(),
+            TextColumn("[bold cyan]{task.fields[status]}"),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
+            install_task = progress.add_task("[bold]Installing msgpack...", total=None, status="Starting")
+            
+            try:
+                # Run the pip process
+                process = subprocess.Popen(
+                    pip_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+                
+                # Update progress with output
+                for line in iter(process.stdout.readline, ''):
+                    progress.update(install_task, status=line.strip())
+                
+                # Wait for process to complete
+                exit_code = process.wait()
+                
+                if exit_code == 0:
+                    progress.update(install_task, status="Completed successfully")
+                    progress.stop()
+                    
+                    console.print(f"[green]✓ msgpack installed to {target_dir}[/green]")
+                    return 1  # Count as 1 operation
+                else:
+                    progress.update(install_task, status=f"Failed with exit code {exit_code}")
+                    console.print(f"[red]Failed to install msgpack with exit code {exit_code}[/red]")
+                    return 0
+                    
+            except Exception as e:
+                progress.update(install_task, status=f"Error: {str(e)}")
+                console.print(f"[red]Error installing msgpack: {str(e)}[/red]")
+                return 0
+    
+    return 0
+
+def run_build(source_path, output_dirs, exclusions):
+        if not isinstance(output_dirs, list):
+            output_dirs = [output_dirs]  # Convert single path to list
+
+        file_ops = FileOperations(source_path)
         console = Console()
         
         console.print(Panel.fit(
@@ -330,14 +395,14 @@ def run_build(source_path, output_dir, exclusions):
             padding=(1, 10)
         ))
         
-        # Run Flutter build before copying files
+        # Run Flutter build before copying files (only once)
         build_successful = file_ops.run_flutter_build(source_path)
         
         if not build_successful:
             console.print("[bold red]Flutter build failed. Exiting...[/bold red]")
             return 1
         
-        # Process paths
+        # Process paths (only once)
         paths = initialize_paths(source_path)
         paths_valid, _ = verify_paths(paths)
         
@@ -345,15 +410,34 @@ def run_build(source_path, output_dir, exclusions):
             console.print("[bold red]Exiting due to missing paths.[/bold red]")
             return 1
         
-        # Execute file operations
-        copy_results, _ = copy_flet_components(file_ops, paths, output_dir, exclusions)
-        desktop_app_copied, _ = copy_desktop_app(file_ops, paths["desktop_app"], output_dir, exclusions)
+        # Copy files to each output directory
+        total_results = []
+        for output_dir in output_dirs:
+            console.print(f"\n[bold blue]Processing output directory: {output_dir}[/bold blue]")
+              # Execute file operations for this output directory
+            copy_results, _ = copy_flet_components(file_ops, paths, output_dir, exclusions)
+            desktop_app_copied, _ = copy_desktop_app(file_ops, paths["desktop_app"], output_dir, exclusions)
+            
+            # Install msgpack if output is a site-packages directory
+            msgpack_installed = install_msgpack(output_dir)
+            
+            # Add results to totals
+            total_files = sum(copy_results.values()) + desktop_app_copied + msgpack_installed
+            total_results.append({
+                "dir": output_dir,
+                "files": total_files
+            })
         
-        # Summary
-        total_files = sum(copy_results.values()) + desktop_app_copied
+        # Summary of all operations
         console.print("\n")
+        success_panel = f"[bold green]Build completed successfully![/bold green]\n\n"
+        
+        # Add details for each output directory
+        for result in total_results:
+            success_panel += f"[white]{result['dir']}: {result['files']} files[/white]\n"
+        
         console.print(Panel.fit(
-            f"[bold green]Build completed successfully![/bold green]\n[white]Total files: {total_files}[/white]",
+            success_panel,
             title="SUCCESS",
             border_style="green",
             padding=(1, 10)
@@ -362,12 +446,18 @@ def run_build(source_path, output_dir, exclusions):
         return 0
 
 def main():
-
     source_path = r"H:\Flutter\flet-v1"
-    output_dir = r"G:\Auto Install Flet_Custom_build\build"
+    
+    # Multiple output directories
+    output_dirs = [
+        r"G:\Folder\venv\Lib\site-packages",
+        # Add more output directories here as needed
+        # r"C:\Another\Output\Directory",
+    ]
+    
     exclusions = ["*.pyc", "*.pdb", "*.log"]
 
-    run_build(source_path, output_dir, exclusions)
+    run_build(source_path, output_dirs, exclusions)
 
 
 if __name__ == "__main__":
