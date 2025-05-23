@@ -1,4 +1,4 @@
-# Flet Custom Build
+# Auto Flet Build
 
 A tool for automating the custom build process of Flet components. The script builds a Flutter application for Windows and then copies all necessary components into a structured output directory.
 
